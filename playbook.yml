@@ -1,0 +1,191 @@
+- hosts: us
+  tasks:
+    - name: Enable backports repo
+      apt_repository:
+        repo: deb http://ftp.debian.org/debian jessie-backports main
+        state: present
+      become: true
+
+- hosts: all
+  tasks:
+    # - name: Update apt cache (will fail due to CFEngine repo problems)
+    #   apt:
+    #     update_cache: yes
+    #   become: yes
+    #   ignore_errors: yes
+
+    - name: Install python-pyOpenSSL (needed by some of the Ansible SSL tasks)
+      package:
+        name: python-openssl
+        state: present
+        default_release: "{{ 'jessie-backports' if ansible_hostname == 'us' else omit }}"
+      become: true
+
+- hosts: hub
+  tasks:
+    - name: Enable Ansible PPA repo
+      apt_repository:
+        repo: deb http://ppa.launchpad.net/ansible/ansible/ubuntu trusty main
+        state: present
+        update_cache: no
+      become: yes
+      register: ansible_ppa
+
+    - name: Add apt key for Ansible PPA repo
+      apt_key:
+        keyserver: keyserver.ubuntu.com
+        id: 93C4A3FD7BB9C367
+      become: yes
+
+    - name: Update apt cache (will fail due to CFEngine repo problems)
+      apt:
+        update_cache: yes
+      become: yes
+      ignore_errors: yes
+      when: ansible_ppa is changed
+
+    - name: Create 'ssl-controller' user
+      user:
+        generate_ssh_key: yes
+        name: ssl-controller
+      become: true
+      register: ssl_controller_user
+
+    # - name: Enable backports repo
+    #   apt_repository:
+    #     repo: deb http://ftp.debian.org/debian stretch-backports main
+    #     state: present
+    #   become: true
+
+    - name: Install Ansible
+      package:
+        name: ansible
+        state: present
+      become: true
+
+    # - name: Install Certbot from backports
+    #   package:
+    #     name: certbot
+    #     state: present
+    #     default_release: stretch-backports
+    #   become: true
+
+    - name: Create LetsEncrypt account key
+      openssl_privatekey:
+        path: "{{ ssl_controller_user['home'] }}/account_key.pem"
+        type: RSA
+        size: 4096
+        owner: "{{ ssl_controller_user['name'] }}"
+        mode: "0400"
+      become: true
+      # command: openssl ecparam -genkey -name secp256r1 -out {{ ssl_controller_user['home'] }}/account_key.pem
+      # args:
+      #   creates: "{{ ssl_controller_user['home'] }}/account_key.pem"
+      # become: true
+      # become_user: "{{ ssl_controller_user['name'] }}"
+
+    - name: Upload Ansible policy for ssl-controller to run
+      copy:
+        src: ssl-controller-policy
+        dest: "{{ ssl_controller_user['home'] }}"
+        owner: "{{ ssl_controller_user['name'] }}"
+      become: true
+
+- hosts: leaves
+  tasks:
+    - name: Create 'ssl' user
+      user:
+        name: ssl
+      register: ssl_user
+      become: yes
+
+    - name: Add 'irc' user to 'ssl' group # so it can read the cert file
+      user:
+        name: irc
+        groups:
+          - ssl
+        append: yes
+      become: yes
+
+    - name: Create /etc/ssl/ircd
+      file:
+        path: /etc/ssl/ircd
+        state: directory
+        owner: ssl
+        group: ssl
+        mode: "0750"
+      become: yes
+
+    - name: Give ssl user power to reload the IRCd
+      lineinfile:
+        dest: /etc/sudoers
+        state: present
+        regexp: '^ssl'
+        line: 'ssl ALL=(root) NOPASSWD: /usr/lib/inspircd/inspircd rehash'
+        validate: visudo -cf %s
+      become: true
+
+    - name: Allow ssl-controller user to ssh into ssl user
+      authorized_key:
+        key: "{{ hostvars['hub']['ssl_controller_user']['ssh_public_key'] }}" # the SSH key we created above
+        user: ssl
+      become: true
+
+    - name: Create certificate signing request (CSR)
+      openssl_csr:
+        # important SSL options
+        common_name: "{{ inventory_hostname }}.rippy.ga" # this is basically ignored
+        subject_alt_name:
+          - "DNS:{{ inventory_hostname }}.rippy.ga" # yes this needs to be in both CN and SAN
+          - "DNS:irc.rippy.ga"
+        ocsp_must_staple: yes
+
+        # usual file options
+        path: "{{ ssl_user['home'] }}/csr.pem"
+        owner: "{{ ssl_user['name'] }}"
+        privatekey_path: /etc/inspircd/key.pem
+
+        # bullshit no-one cares about
+        country_name: GB
+        email_address: zofrex@gmail.com
+        locality_name: London
+        organization_name: Rippy
+      become: yes
+
+    - name: Download CSR
+      fetch:
+        src: "{{ ssl_user['home'] }}/csr.pem"
+        dest: /tmp
+
+- hosts: hub
+  tasks:
+    - name: Upload CSRs
+      copy:
+        src: /tmp/{{ leaf_server }}/home/ssl/csr.pem
+        dest: "{{ ssl_controller_user['home'] }}/csr-{{ leaf_server }}.pem"
+      become: true
+      become_user: "{{ ssl_controller_user['name'] }}"
+      with_inventory_hostnames:
+        - leaves
+      loop_control:
+        loop_var: leaf_server
+
+    - name: Add leaf SSH host key to known_hosts for ssl-controller user
+      known_hosts:
+        name: "{{ leaf_server }}"
+        key: "{{ leaf_server}} ssh-rsa {{ hostvars[leaf_server]['ansible_facts']['ssh_host_key_rsa_public'] }}"
+      become: true
+      become_user: "{{ ssl_controller_user['name'] }}"
+      with_inventory_hostnames:
+        - leaves
+      loop_control:
+        loop_var: leaf_server
+
+    - name: Test that hub can SSH into leaves
+      shell: ansible-playbook -u ssl -i hosts.ini test-connection.yml
+      args:
+        chdir: "{{ ssl_controller_user['home'] }}/ssl-controller-policy"
+      become: true
+      become_user: "{{ ssl_controller_user['name'] }}"
+      changed_when: no
+      check_mode: no

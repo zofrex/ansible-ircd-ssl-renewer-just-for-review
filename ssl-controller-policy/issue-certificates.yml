@@ -1,0 +1,172 @@
+- hosts: all
+  connection: local
+  tasks:
+  - set_fact:
+      blind_upload_true: "{{ blind_upload | default(false) | bool or lookup('env', 'BLIND_UPLOAD') | bool}}"
+  - debug:
+      msg: Running in "blind upload" mode - will not perform any tests against IRCd, attempt to reload IRCd config, or do anything that assumes IRCd is running.
+    when: blind_upload_true
+    run_once: yes
+
+- hosts: leaves
+  connection: local
+  tasks:
+  - name: Test that we can connect to IRCd # (otherwise we can't check if cerfificate is invalid or requires renewing)
+    shell: openssl s_client -connect {{ inventory_hostname }}:6697 < /dev/null
+    check_mode: no
+    when: not blind_upload_true
+
+  # rc == 0: cert is valid
+  # rc == 1: cert is invalid
+  # stdout: debugging noise _plus_ actual certificate, if valid
+  - name: Check deployed certificate's validity & get certificate if valid
+    # "-verify 5" sets max cert depth to 5
+    shell: openssl s_client -connect {{ inventory_hostname}}:6697 -verify 5 -verify_return_error -verify_hostname {{ inventory_hostname }}.rippy.ga -CAfile fakelerootx1.pem
+    check_mode: no
+    changed_when: no
+    ignore_errors: yes
+    register: certificate_check
+    when: not blind_upload_true
+
+  # rc == 0: cert is valid for 2 weeks minimum
+  # rc == 1: cert is going to expire within 2 weeks
+  # time period must be <= time in letsencrypt check below!
+  - name: Check if deployed certificate will expire in next 2 weeks (1209600 seconds)
+    shell: |
+      openssl x509 -noout -checkend 1209600 << 'DELIMITER%/*`;%^(('
+      {{ certificate_check.stdout }}
+      DELIMITER%/*`;%^((
+    check_mode: no
+    changed_when: no
+    ignore_errors: yes
+    register: certificate_expiry_check
+    when:
+    - not blind_upload_true
+    - certificate_check is succeeded # if verify fails, the output doesn't include the cert. And who cares about expiration date if it's invalid!
+
+  # TODO: don't do all the next shit if the above are both ok!
+  # TODO: and modularise them so we can do them again at the end!
+
+  - name: Get deployed certificate's fingerprint
+    shell: |
+      openssl x509 -noout -fingerprint << 'DELIMITER%/*`;%^(('
+      {{ certificate_check.stdout }}
+      DELIMITER%/*`;%^((
+    check_mode: no
+    changed_when: no
+    register: certificate_fingerprint
+    when:
+    - not blind_upload_true
+    - certificate_check is succeeded
+
+  - name: load sekrits
+    include_vars:
+      file: secrets.yml
+
+  - name: prepare tasks for each server
+    file:
+      src: issue-one-certificate.yml
+      dest: __issue-one-certificate_{{ inventory_hostname }}.yml
+      state: link
+
+  - name: Request certificate renewal
+    letsencrypt:
+      account_email: "{{ email }}"
+      account_key: "/home/ssl-controller/account_key.pem"
+      challenge: dns-01
+      csr: "/home/ssl-controller/csr-{{ inventory_hostname }}.pem"
+      dest: "/home/ssl-controller/cert-{{ inventory_hostname }}.pem"
+      agreement: "https://letsencrypt.org/documents/LE-SA-v1.2-November-15-2017.pdf"
+      remaining_days: 91 # 15 # must be >= expiry check done above! # TODO UNFORCE THIS
+      force: yes
+    register: letsencrypt_request
+
+  - name: issue certificates for each server sequentially
+    include: "__issue-one-certificate_{{ inventory_hostname }}.yml"
+    when: letsencrypt_request is changed
+
+- hosts: leaves
+  tasks:
+  - name: upload certificate
+    copy:
+      src: "/home/ssl-controller/cert-{{ inventory_hostname }}.pem"
+      dest: /etc/ssl/ircd/cert.pem
+      mode: '0640'
+
+  - name: check fingerprint of cert on disk
+    shell: openssl x509 -in /etc/ssl/ircd/cert.pem -noout -fingerprint
+    check_mode: no
+    changed_when: no
+    register: new_certificate_fingerprint
+    when:
+    - not blind_upload_true
+    - certificate_check is succeeded
+
+  - name: rehash inspircd
+    shell: sh -c "sudo /usr/lib/inspircd/inspircd rehash"
+    when: 
+    - not blind_upload_true
+    - certificate_check is failed or certificate_expiry_check is failed or certificate_fingerprint.stdout != new_certificate_fingerprint.stdout
+    register: rehash
+    failed_when: "'InspIRCd rehashed' not in rehash.stdout"
+
+  # NB: it is CRITICALLY important that you never send a command starting with a capital R or Q
+  - name: reload ssl certs in inspircd
+    shell: |
+      (
+      echo NICK ssl_$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 20 | head -n 1)
+      echo NICK ssl_$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 20 | head -n 1)
+      echo USER sslreloader 8 * :ssl
+      sleep 10
+      echo OPER ssl {{ ssl_ircd_password }}
+      sleep 5
+      echo rehash -ssl
+      sleep 1
+      ) | timeout 20 openssl s_client -connect 127.0.0.1:6697
+    register: reload_result
+    failed_when: "'OPER :You have not registered' in reload_result.stdout or ':Invalid oper credentials' in reload_result.stdout or ':Permission Denied - You do not have the required operator privileges' in reload_result.stdout"
+    when: not blind_upload_true
+    # when: no # TODO unbreak this
+
+- hosts: leaves
+  connection: local
+  tasks:
+  - name: Test that we can still connect to IRCd # (otherwise we can't check if cerfificate is invalid or expiring shortly)
+    shell: openssl s_client -connect {{ inventory_hostname }}:6697 < /dev/null
+    check_mode: no
+    changed_when: no
+    when: not blind_upload_true
+
+  # rc == 0: cert is valid
+  # rc == 1: cert is invalid
+  # stdout: debugging noise _plus_ actual certificate, if valid
+  - name: Check deployed certificate's validity
+    # "-verify 5" sets max cert depth to 5
+    shell: openssl s_client -connect {{ inventory_hostname}}:6697 -verify 5 -verify_return_error -verify_hostname {{ inventory_hostname }}.rippy.ga -CAfile fakelerootx1.pem
+    check_mode: no
+    changed_when: no
+    register: new_deployed_certificate_check
+    when: not blind_upload_true
+
+  # rc == 0: cert is valid for 2 weeks minimum
+  # rc == 1: cert is going to expire within 2 weeks
+  # time period must be <= time in letsencrypt check below!
+  - name: Check if deployed certificate will expire in next 2 weeks (1209600 seconds)
+    shell: |
+      openssl x509 -noout -checkend 1209600 << 'DELIMITER%/*`;%^(('
+      {{ new_deployed_certificate_check.stdout }}
+      DELIMITER%/*`;%^((
+    check_mode: no
+    changed_when: no
+    when: not blind_upload_true
+
+  - name: Check deployed certificate's fingerprint matches the certificate we created
+    shell: |
+      openssl x509 -noout -fingerprint << 'DELIMITER%/*`;%^(('
+      {{ new_deployed_certificate_check.stdout }}
+      DELIMITER%/*`;%^((
+    check_mode: no
+    changed_when: no
+    register: new_deployed_certificate_fingerprint
+    failed_when: new_certificate_fingerprint.stdout != new_deployed_certificate_fingerprint.stdout
+    when: not blind_upload_true

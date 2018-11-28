@@ -1,0 +1,5 @@
+- hosts: leaves
+  tasks:
+    - name: test that we can SSH in
+      shell: "true"
+      check_mode: no

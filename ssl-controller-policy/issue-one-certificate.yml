@@ -1,0 +1,35 @@
+- name: Update DNS
+  cloudflare_dns:
+    zone: rippy.ga
+    type: TXT
+    record: "{{ item.value['dns-01'].resource }}.{{ item.key | regex_replace('\\.rippy\\.ga$', '') }}"
+    value: "{{ item.value['dns-01'].resource_value }}"
+    account_api_token: "{{ cloudflare_api_key }}"
+    account_email: "{{ cloudflare_email }}"
+    solo: yes
+  with_dict: "{{ letsencrypt_request['challenge_data'] }}"
+  loop_control:
+    label: "{{ item.key }} => {{ item.value['dns-01'].resource_value }}"
+
+- name: Create certificate
+  letsencrypt:
+    account_email: "{{ email }}"
+    account_key: "{{ ansible_user_dir }}/account_key.pem"
+    challenge: dns-01
+    csr: "{{ ansible_user_dir }}/csr-{{ inventory_hostname }}.pem"
+    fullchain_dest: "{{ ansible_user_dir }}/cert-{{ inventory_hostname }}.pem"
+    agreement: "https://letsencrypt.org/documents/LE-SA-v1.2-November-15-2017.pdf"
+    data: "{{ letsencrypt_request }}"
+
+- name: Clean up DNS
+  cloudflare_dns:
+    zone: rippy.ga
+    type: TXT
+    record: "{{ item.value['dns-01'].resource }}.{{ item.key | regex_replace('\\.rippy\\.ga$', '') }}"
+    state: absent
+    value: "" # ignored
+    account_api_token: "{{ cloudflare_api_key }}"
+    account_email: "{{ cloudflare_email }}"
+  with_dict: "{{ letsencrypt_request['challenge_data'] }}"
+  loop_control:
+    label: "{{ item.key }}"
