@@ -1,26 +1,3 @@
-- hosts: us
-  tasks:
-    - name: Enable backports repo
-      apt_repository:
-        repo: deb http://ftp.debian.org/debian jessie-backports main
-        state: present
-      become: true
-
-- hosts: all
-  tasks:
-    # - name: Update apt cache (will fail due to CFEngine repo problems)
-    #   apt:
-    #     update_cache: yes
-    #   become: yes
-    #   ignore_errors: yes
-
-    - name: Install python-pyOpenSSL (needed by some of the Ansible SSL tasks)
-      package:
-        name: python-openssl
-        state: present
-        default_release: "{{ 'jessie-backports' if ansible_hostname == 'us' else omit }}"
-      become: true
-
 - hosts: hub
   tasks:
     - name: Enable Ansible PPA repo
@@ -29,7 +6,6 @@
         state: present
         update_cache: no
       become: yes
-      register: ansible_ppa
 
     - name: Add apt key for Ansible PPA repo
       apt_key:
@@ -42,7 +18,12 @@
         update_cache: yes
       become: yes
       ignore_errors: yes
-      when: ansible_ppa is changed
+
+    - name: Install Ansible
+      package:
+        name: ansible
+        state: present
+      become: true
 
     - name: Create 'ssl-controller' user
       user:
@@ -51,48 +32,50 @@
       become: true
       register: ssl_controller_user
 
-    # - name: Enable backports repo
-    #   apt_repository:
-    #     repo: deb http://ftp.debian.org/debian stretch-backports main
-    #     state: present
-    #   become: true
-
-    - name: Install Ansible
+    - name: Install python-pyOpenSSL (needed by some of the Ansible SSL tasks)
       package:
-        name: ansible
+        name: python-openssl
         state: present
       become: true
 
-    # - name: Install Certbot from backports
-    #   package:
-    #     name: certbot
-    #     state: present
-    #     default_release: stretch-backports
-    #   become: true
-
     - name: Create LetsEncrypt account key
       openssl_privatekey:
-        path: "{{ ssl_controller_user['home'] }}/account_key.pem"
+        path: /home/ssl-controller/account_key.pem
         type: RSA
         size: 4096
-        owner: "{{ ssl_controller_user['name'] }}"
+        owner: ssl-controller
         mode: "0400"
       become: true
-      # command: openssl ecparam -genkey -name secp256r1 -out {{ ssl_controller_user['home'] }}/account_key.pem
-      # args:
-      #   creates: "{{ ssl_controller_user['home'] }}/account_key.pem"
-      # become: true
-      # become_user: "{{ ssl_controller_user['name'] }}"
 
     - name: Upload Ansible policy for ssl-controller to run
       copy:
         src: ssl-controller-policy
-        dest: "{{ ssl_controller_user['home'] }}"
-        owner: "{{ ssl_controller_user['name'] }}"
+        dest: /home/ssl-controller
+        owner: ssl-controller
       become: true
 
 - hosts: leaves
   tasks:
+    - name: Enable backports repo
+      apt_repository:
+        repo: deb http://ftp.debian.org/debian jessie-backports main
+        state: present
+        update_cache: no
+      become: true
+
+    - name: Update apt cache (will fail due to CFEngine repo problems)
+      apt:
+        update_cache: yes
+      become: yes
+      ignore_errors: yes
+
+    - name: Install python-pyOpenSSL (needed by some of the Ansible SSL tasks)
+      package:
+        name: python-openssl
+        state: present
+        default_release: jessie-backports
+      become: true
+
     - name: Create 'ssl' user
       user:
         name: ssl
@@ -152,35 +135,29 @@
         organization_name: Rippy
       become: yes
 
-    - name: Download CSR
+    - name: Download CSR to controller machine
       fetch:
         src: "{{ ssl_user['home'] }}/csr.pem"
         dest: /tmp
 
-- hosts: hub
-  tasks:
-    - name: Upload CSRs
+    - name: Upload CSRs to hub
       copy:
-        src: /tmp/{{ leaf_server }}/home/ssl/csr.pem
-        dest: "{{ ssl_controller_user['home'] }}/csr-{{ leaf_server }}.pem"
+        src: /tmp/{{ inventory_hostname }}/home/ssl/csr.pem
+        dest: "/home/ssl-controller/csr-{{ inventory_hostname }}.pem"
       become: true
-      become_user: "{{ ssl_controller_user['name'] }}"
-      with_inventory_hostnames:
-        - leaves
-      loop_control:
-        loop_var: leaf_server
+      become_user: ssl-controller
+      delegate_to: hub
 
     - name: Add leaf SSH host key to known_hosts for ssl-controller user
       known_hosts:
-        name: "{{ leaf_server }}"
-        key: "{{ leaf_server}} ssh-rsa {{ hostvars[leaf_server]['ansible_facts']['ssh_host_key_rsa_public'] }}"
+        name: "{{ inventory_hostname }}"
+        key: "{{ inventory_hostname}} ssh-rsa {{ ansible_facts['ssh_host_key_rsa_public'] }}"
       become: true
-      become_user: "{{ ssl_controller_user['name'] }}"
-      with_inventory_hostnames:
-        - leaves
-      loop_control:
-        loop_var: leaf_server
+      become_user: ssl-controller
+      delegate_to: hub
 
+- hosts: hub
+  tasks:
     - name: Test that hub can SSH into leaves
       shell: ansible-playbook -u ssl -i hosts.ini test-connection.yml
       args:
