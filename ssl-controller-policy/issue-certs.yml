@@ -1,0 +1,25 @@
+- name: Load secrets
+  include_vars:
+    file: secrets.yml
+
+- name: Prepare tasks for each server
+  file:
+    src: issue-one-certificate.yml
+    dest: __issue-one-certificate_{{ inventory_hostname }}.yml
+    state: link
+
+- name: Request certificate renewal
+  acme_certificate:
+    account_email: "{{ email }}"
+    account_key: "/home/ssl-controller/account_key.pem"
+    challenge: dns-01
+    csr: "/home/ssl-controller/csr-{{ inventory_hostname }}.pem"
+    dest: "/home/ssl-controller/cert-{{ inventory_hostname }}.pem"
+    agreement: "https://letsencrypt.org/documents/LE-SA-v1.2-November-15-2017.pdf"
+    remaining_days: 91 # 15 # must be >= expiry check done above! # TODO UNFORCE THIS
+    force: yes
+  register: letsencrypt_request
+
+- name: Issue certificates for each server sequentially
+  include: "__issue-one-certificate_{{ inventory_hostname }}.yml"
+  when: letsencrypt_request is changed

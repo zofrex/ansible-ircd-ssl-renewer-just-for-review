@@ -1,0 +1,50 @@
+# Include to check certs on a remote server
+# required vars:
+# - certificate_validity_check_varname - variable name to write validity check result to
+# - certificate_fingerprint_varname - variable name to write fingerprint to
+# optional vars:
+# - certificate_expiry_check_varname - variable name to write expiry check result to
+# - ignore_validity_errors
+
+- name: Test that we can connect to IRCd # (otherwise we can't check if cerfificate is invalid or requires renewing)
+  shell: openssl s_client -connect {{ inventory_hostname }}:6697 < /dev/null
+  check_mode: no
+  changed_when: no
+
+# rc == 0: cert is valid
+# rc == 1: cert is invalid
+# stdout: debugging noise _plus_ actual certificate, if valid
+- name: Check deployed certificate's validity & get certificate if valid
+  # "-verify 5" sets max cert depth to 5
+  shell: openssl s_client -connect {{ inventory_hostname}}:6697 -verify 5 -verify_return_error -CAfile fakelerootx1.pem # can't verify hostname on old openssl :(
+  # shell: openssl s_client -connect {{ inventory_hostname}}:6697 -verify 5 -verify_return_error -verify_hostname {{ inventory_hostname }}.rippy.ga -CAfile fakelerootx1.pem
+  check_mode: no
+  changed_when: no
+  ignore_errors: "{{ ignore_validity_errors | default(false) }}"
+  register: "{{ certificate_validity_check_varname }}"
+
+# rc == 0: cert is valid for 2 weeks minimum
+# rc == 1: cert is going to expire within 2 weeks
+# time period must be <= time in letsencrypt check below!
+- name: Check if deployed certificate will expire in next 2 weeks (1209600 seconds)
+  shell: |
+    openssl x509 -noout -checkend 1209600 << 'DELIMITER%/*`;%^(('
+    {{ vars[certificate_validity_check_varname].stdout }}
+    DELIMITER%/*`;%^((
+  check_mode: no
+  changed_when: no
+  ignore_errors: "{{ ignore_validity_errors | default(false) }}"
+  register: "{{ certificate_expiry_check_varname | default(omit) }}"
+  when:
+  - vars[certificate_validity_check_varname] is succeeded # if verify fails, the output doesn't include the cert. And who cares about expiration date if it's invalid!
+
+- name: Get deployed certificate's fingerprint
+  shell: |
+    openssl x509 -noout -fingerprint << 'DELIMITER%/*`;%^(('
+    {{ vars[certificate_validity_check_varname].stdout }}
+    DELIMITER%/*`;%^((
+  check_mode: no
+  changed_when: no
+  register: "{{ certificate_fingerprint_varname }}"
+  when:
+  - vars[certificate_validity_check_varname] is succeeded

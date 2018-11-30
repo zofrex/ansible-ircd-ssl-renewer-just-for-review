@@ -1,0 +1,52 @@
+- name: Initial setup
+  hosts: all
+  connection: local
+  tasks:
+  - name: Check if we're in blind upload mode
+    set_fact:
+      blind_upload_true: "{{ blind_upload | default(false) | bool or lookup('env', 'BLIND_UPLOAD') | bool}}"
+  - name: Display if we're in blind mode
+    debug:
+      msg: Running in "blind upload" mode - will not perform any tests against IRCd, attempt to reload IRCd config, or do anything that assumes IRCd is running.
+    when: blind_upload_true
+    run_once: yes
+
+- name: leaves (on hub)
+  hosts: leaves
+  connection: local
+  tasks:
+  - name: Check certificate
+    include_tasks: test-remote-cert.yml
+    vars:
+      certificate_validity_check_varname: certificate_check
+      certificate_expiry_check_varname: certificate_expiry_check
+      certificate_fingerprint_varname: certificate_fingerprint
+      ignore_validity_errors: true
+    when: not blind_upload_true
+
+  - name: Issue new certificate
+    include_tasks: issue-certs.yml
+    when: blind_upload_true or certificate_check is failed or certificate_expiry_check is failed
+
+- hosts: leaves
+  tasks:
+  - name: Upload certificate
+    include_tasks: upload-certs.yml
+    when: blind_upload_true or certificate_check is failed or certificate_expiry_check is failed
+ 
+- name: leaves (on hub)
+  hosts: leaves
+  connection: local
+  tasks:
+  - name: Check certificate again
+    include_tasks: test-remote-cert.yml
+    vars:
+      certificate_validity_check_varname: new_deployed_certificate_check
+      certificate_fingerprint_varname: new_deployed_certificate_fingerprint
+    when: not blind_upload_true and (certificate_check is failed or certificate_expiry_check is failed)
+
+  - name: Check deployed certificate's fingerprint matches the certificate we created
+    assert:
+      that: new_certificate_fingerprint.stdout == new_deployed_certificate_fingerprint.stdout
+      fail_msg: "Observed fingerprint is {{ new_deployed_certificate_fingerprint.stdout }} but was expecting {{ new_certificate_fingerprint.stdout }}"
+    when: not blind_upload_true and (certificate_check is failed or certificate_expiry_check is failed)

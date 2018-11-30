@@ -19,15 +19,17 @@ The user will periodically (once a day?) run an Ansible policy that will:
 
 The leaves will have a user 'ssl' which will have no special permissions, but is able to:
 
-* copy the SSL cert in place (it has ownership over the directory it resides in)
+* copy the SSL cert in place (it has write perms over the directory it resides in and ownership of the file)
 * reload the IRC server config (via a passwordless sudo entry for this specific command)
+
+There is also a new o:line for a user "ssl" who can just rehash the config - this is necessary so the ssl user can log in over IRC and reload the SSL cert (which doesn't happen with a normal rehash).
 
 # Ansible policies
 
 There are two:
 
 * `./playbook.yml` - this performs initial setup, creating users, generating LE key, etc, that only needs to be done once. This is run from our machines and needs to be run on all the hub/leaf servers together by someone with root access to all of them.
-* `./ssl-controller-policy/` - this is a multi-file policy that is uploaded to the hub (by the initial setup policy) and is the one that runs regularly to actually update the certificates.
+* `./ssl-controller-policy/playbook.yml` - this is a multi-file policy that is uploaded to the hub (by the initial setup policy) and is the one that runs regularly to actually update the certificates.
 
 # Files
 
@@ -35,11 +37,13 @@ The Lets Encrypt account key will be stored in
 
 `/home/ssl-controller/account-key.pem`
 
-The IRC certificate is:
+The IRC certificate is still in the same place as before:
 
-`/etc/ssl/ircd/cert.pem`
+`/etc/inspircd/cert.pem`
 
-The parent directory for this is owned by the user 'ssl' and the group 'irc', so the ssl user can upload certs and the IRCd can read them.
+But now it is owned by the ssl user, and is world-readable.
+
+The parent directory for this is now owned by the user 'irc' and the group 'ssl', so the ssl user can read the dir and create certs and the IRCd can read them (the rest of the config files are irc:irc and not readable by ssl).
 
 `secrets.yml`
 
@@ -66,34 +70,30 @@ Or if initial setup hasn't changed and you only want to upload ssl-controller-po
 Just do the thing:
 
 ```
-ansible-playbook -u ssl -i hosts.ini issue-certificates.yml
+ansible-playbook -u ssl -i hosts.ini playbook.yml
 ```
 
 Do the thing on just one of the leaves with `--limit`:
 
 ```
-ansible-playbook -u ssl -i hosts.ini --limit eu issue-certificates.yml
+ansible-playbook -i hosts.ini --limit eu playbook.yml
 ```
 
-Run in "blind update" mode - this mode doesn't assume Inspircd is running, so it won't make any checks against the IRCd, rehash it, or confirm deployment of the certificate. Useful if Inspircd won't start until it has a certificate!
+Run in "blind upload" mode - this mode doesn't assume Inspircd is running, so it won't make any checks against the IRCd, rehash it, or confirm deployment of the certificate. Useful if Inspircd won't start until it has a certificate!
 
 ```
-ansible-playbook -u ssl -i hosts.ini -e 'blind_upload=true' issue-certificates.yml
+ansible-playbook -i hosts.ini -e 'blind_upload=true' playbook.yml
 # or:
-BLIND_UPLOAD=true ansible-playbook -u ssl -i hosts.ini issue-certificates.yml
+BLIND_UPLOAD=true ansible-playbook -i hosts.ini playbook.yml
 ```
 
 # Initial deployment
 
-The first deployment is complicated by the fact we've moved the certificate location, and while creating this is done via Ansible, the inspircd configuration is still in CFEngine.
+The first deployment is complicated by the fact that these files are still under CFEngine's control, but it's Ansible that adds the new user.
 
 Here's the play-by-play for the initial deployment:
 
 1. Run the Ansible initial setup policy which will create the users, dirs, etc
-2. Run the issue certificates policy from the hub in blind update mode, this will put the certs in place
-3. Run the CFEngine policy to change Inspircd's configuration files
+2. Create secrets.yml
+3. Upload (and run) the new CFEngine policy to set new permissions on config dir & cert
 4. Run the issue certificates policy normally, which will then rehash Inspircd configuration and SSL
-
-It is important to not run #2 unless you are ready to immediately run #3, as it will leave Inspircd in a state where it would not successfully restart.
-
-Even consider running #3 first maybe? TODO

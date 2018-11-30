@@ -1,8 +1,8 @@
 - name: Update DNS
   cloudflare_dns:
-    zone: rippy.ga
+    zone: "{{ item.key.split('.',1)[1] }}"
     type: TXT
-    record: "{{ item.value['dns-01'].resource }}.{{ item.key | regex_replace('\\.rippy\\.ga$', '') }}"
+    record: "{{ item.value['dns-01'].resource }}.{{ item.key.split('.',1)[0] }}"
     value: "{{ item.value['dns-01'].resource_value }}"
     account_api_token: "{{ cloudflare_api_key }}"
     account_email: "{{ cloudflare_email }}"
@@ -12,7 +12,7 @@
     label: "{{ item.key }} => {{ item.value['dns-01'].resource_value }}"
 
 - name: Create certificate
-  letsencrypt:
+  acme_certificate:
     account_email: "{{ email }}"
     account_key: "{{ ansible_user_dir }}/account_key.pem"
     challenge: dns-01
@@ -23,9 +23,9 @@
 
 - name: Clean up DNS
   cloudflare_dns:
-    zone: rippy.ga
+    zone: "{{ item.key.split('.',1)[1] }}"
     type: TXT
-    record: "{{ item.value['dns-01'].resource }}.{{ item.key | regex_replace('\\.rippy\\.ga$', '') }}"
+    record: "{{ item.value['dns-01'].resource }}.{{ item.key.split('.',1)[0] }}"
     state: absent
     value: "" # ignored
     account_api_token: "{{ cloudflare_api_key }}"

@@ -1,0 +1,35 @@
+- name: upload certificate
+  copy:
+    src: "/home/ssl-controller/cert-{{ inventory_hostname }}.pem"
+    dest: /etc/inspircd/cert.pem
+    mode: '0644'
+
+- block:
+  - name: check fingerprint of cert on disk
+    shell: openssl x509 -in /etc/inspircd/cert.pem -noout -fingerprint
+    check_mode: no
+    changed_when: no
+    register: new_certificate_fingerprint
+
+  - name: rehash inspircd
+    shell: sh -c "sudo /usr/lib/inspircd/inspircd rehash"
+    when: certificate_check is failed or certificate_expiry_check is failed or certificate_fingerprint.stdout != new_certificate_fingerprint.stdout
+    register: rehash
+    failed_when: "'InspIRCd rehashed' not in rehash.stdout"
+
+  # NB: it is CRITICALLY important that you never send a command starting with a capital R or Q
+  - name: reload ssl certs in inspircd
+    shell: |
+      (
+      echo NICK ssl_$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 20 | head -n 1)
+      echo NICK ssl_$(cat /dev/urandom | tr -dc 'a-zA-Z' | fold -w 20 | head -n 1)
+      echo USER sslreloader 8 * :ssl
+      sleep 10
+      echo OPER ssl {{ ssl_ircd_password }}
+      sleep 5
+      echo rehash -ssl
+      sleep 1
+      ) | timeout 20 openssl s_client -connect 127.0.0.1:6697
+    register: reload_result
+    failed_when: "'OPER :You have not registered' in reload_result.stdout or ':Invalid oper credentials' in reload_result.stdout or ':Permission Denied - You do not have the required operator privileges' in reload_result.stdout"
+  when: not blind_upload_true

@@ -82,23 +82,6 @@
       register: ssl_user
       become: yes
 
-    - name: Add 'irc' user to 'ssl' group # so it can read the cert file
-      user:
-        name: irc
-        groups:
-          - ssl
-        append: yes
-      become: yes
-
-    - name: Create /etc/ssl/ircd
-      file:
-        path: /etc/ssl/ircd
-        state: directory
-        owner: ssl
-        group: ssl
-        mode: "0750"
-      become: yes
-
     - name: Give ssl user power to reload the IRCd
       lineinfile:
         dest: /etc/sudoers
